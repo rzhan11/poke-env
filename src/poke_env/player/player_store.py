@@ -1,0 +1,2 @@
+
+ALL_PLAYERS = dict()

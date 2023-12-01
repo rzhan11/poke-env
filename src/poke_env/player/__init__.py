@@ -34,6 +34,14 @@ from poke_env.player.utils import (
 )
 from poke_env.ps_client import PSClient
 
+from poke_env.player.rllib_api import (
+    PokeExternalEnv
+)
+
+from poke_env.player.rllib_api2 import (
+    BaseRLPokeEnv
+)
+
 __all__ = [
     "env_player",
     "openai_api",
@@ -65,4 +73,6 @@ __all__ = [
     "DoubleBattleOrder",
     "MaxBasePowerPlayer",
     "SimpleHeuristicsPlayer",
+    "PokeExternalEnv",
+    "BaseRLPokeEnv",
 ]

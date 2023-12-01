@@ -22,6 +22,15 @@ from typing import (
     Union,
 )
 
+from ray.rllib.env import ExternalEnv
+from ray.rllib.utils.typing import (
+    EnvActionType,
+    EnvInfoDict,
+    EnvObsType,
+    EnvType,
+    MultiEnvDict,
+)
+
 from gymnasium.core import ActType, Env, ObsType
 from gymnasium.spaces import Discrete, Space
 
@@ -74,7 +83,7 @@ class _AsyncPlayer(Generic[ObsType, ActType], Player):
 
     def __init__(
         self,
-        user_funcs: OpenAIGymEnv[ObsType, ActType],
+        user_funcs: PokeExternalEnv,
         username: str,
         **kwargs: Any,
     ):
@@ -97,7 +106,7 @@ class _AsyncPlayer(Generic[ObsType, ActType], Player):
         if not self.current_battle == battle:
             raise RuntimeError("Using different battles for queues")
         battle_to_send = self._user_funcs.embed_battle(battle)
-        await self.observations.async_put(battle_to_send)
+        await self.observations.async_put((battle.battle_tag, battle_to_send))
         action = await self.actions.async_get()
         if action == -1:
             return ForfeitBattleOrder()
@@ -108,22 +117,11 @@ class _AsyncPlayer(Generic[ObsType, ActType], Player):
         asyncio.run_coroutine_threadsafe(self.observations.async_put(to_put), POKE_LOOP)
 
 
-class _ABCMetaclass(type(ABC)):
-    pass
+ALL_PLAYERS = dict()
 
-
-class _EnvMetaclass(type(Env)):
-    pass
-
-
-class _OpenAIGymEnvMetaclass(_EnvMetaclass, _ABCMetaclass):
-    pass
-
-
-class OpenAIGymEnv(
-    Env[ObsType, ActType],
-    ABC,
-    metaclass=_OpenAIGymEnvMetaclass,
+class BaseRLPokeEnv(
+    Env,
+    ABC
 ):
     """
     Base class implementing the OpenAI Gym API on the main thread.
@@ -136,6 +134,7 @@ class OpenAIGymEnv(
 
     def __init__(
         self,
+        opponent: Player,
         account_configuration: Optional[AccountConfiguration] = None,
         *,
         avatar: Optional[int] = None,
@@ -194,7 +193,20 @@ class OpenAIGymEnv(
             leave it inactive.
         :type start_challenging: bool
         """
-        self.agent = _AsyncPlayer(
+        # super().__init__(
+        #     action_space=Discrete(self.action_space_size()),
+        #     observation_space=self.describe_embedding(),
+        # )
+
+        ## Moved from EnvPlayer
+        self._reward_buffer: Dict[AbstractBattle, float] = {}
+        self._opponent = opponent.username if opponent is not None else None
+        if battle_format is None:
+            battle_format = self._DEFAULT_BATTLE_FORMAT
+        if opponent is None:
+            start_challenging = False
+
+        agent = _AsyncPlayer(
             self,
             username=self.__class__.__name__,  # type: ignore
             account_configuration=account_configuration,
@@ -210,10 +222,12 @@ class OpenAIGymEnv(
             ping_timeout=ping_timeout,
             team=team,
         )
-        self._actions = self.agent.actions
-        self._observations = self.agent.observations
-        self.action_space = Discrete(self.action_space_size())  # type: ignore
-        self.observation_space = self.describe_embedding()
+        ALL_PLAYERS[agent.username] = agent
+        self.agent = agent.username
+        self._actions = ALL_PLAYERS[self.agent].actions
+        self._observations = ALL_PLAYERS[self.agent].observations
+        # self.action_space = Discrete(self.action_space_size())  # type: ignore
+        # self.observation_space = self.describe_embedding()
         self.current_battle: Optional[AbstractBattle] = None
         self.last_battle: Optional[AbstractBattle] = None
         self._keep_challenging: bool = False
@@ -224,6 +238,51 @@ class OpenAIGymEnv(
             self._challenge_task = asyncio.run_coroutine_threadsafe(
                 self._challenge_loop(), POKE_LOOP
             )
+
+        # track episodes
+        self._episode_ids = set()
+        self._last_episode_id = None
+        self._last_episode_obs = None
+
+    def run(self):
+        while True:
+            # currently don't understand when this could occur
+            # assert self.current_battle is not None, "current battle is None..."
+            # if self.current_battle.finished:
+            #     raise RuntimeError("Battle is already finished, call reset")
+
+            # get the observation from the simulator
+            episode_id, observation = self._observations.get()
+
+            print("run iter():", episode_id)
+
+            # start the episode, if it is our first time seeing the id
+            if episode_id not in self._episode_ids:
+                if self._last_episode_id is not None:
+                    self.end_episode(episode_id=self._last_episode_id, observation=self._last_episode_obs)
+
+                self._episode_ids.add(episode_id)
+                self.start_episode(episode_id=episode_id)
+
+            if self._last_episode_id is not None:
+                assert episode_id == self._last_episode_id, "Seeing multiple episode IDs at once"
+            # update info
+            self._last_episode_id = episode_id
+            self._last_episode_obs = observation
+
+
+            # get our action from the bot
+            action = self.get_action(episode_id, observation=observation)
+
+            # record the returns
+            battle = copy.copy(self.current_battle)
+            battle.logger = None
+            self.last_battle = copy.deepcopy(battle)
+            reward = self.calc_reward(self.last_battle, self.current_battle)
+            self.log_returns(episode_id=episode_id, reward=reward)
+
+            # send the actions back to the server
+            self._actions.put(action)
 
     @abstractmethod
     def calc_reward(
@@ -292,20 +351,24 @@ class OpenAIGymEnv(
         :rtype: int
         """
         pass
+    
 
-    @abstractmethod
-    def get_opponent(
-        self,
-    ) -> Union[Player, str, List[Player], List[str]]:
-        """
-        Returns the opponent (or list of opponents) that will be challenged
-        on the next iteration of the challenge loop. If a list is returned,
-        a random element will be chosen at random during the challenge loop.
+    def get_opponent(self) -> Union[Player, str, List[Player], List[str]]:
+        if self._opponent is None:
+            raise RuntimeError(
+                "Unspecified opponent. "
+                "Specify it in the constructor or use set_opponent"
+            )
+        return self._opponent
 
-        :return: The opponent (or list of opponents).
-        :rtype: Player or str or list(Player) or list(str)
+    def set_opponent(self, opponent: Union[Player, str]):
         """
-        pass
+        Sets the next opponent to the specified opponent.
+
+        :param opponent: The next opponent to challenge
+        :type opponent: Player or str
+        """
+        self._opponent = opponent
 
     def _get_opponent(self) -> Union[Player, str]:
         opponent = self.get_opponent()
@@ -327,24 +390,24 @@ class OpenAIGymEnv(
         elif not self._seed_initialized:
             super().reset(seed=int(time.time()))  # type: ignore
             self._seed_initialized = True
-        if not self.agent.current_battle:
+        if not ALL_PLAYERS[self.agent].current_battle:
             count = self._INIT_RETRIES
-            while not self.agent.current_battle:
+            while not ALL_PLAYERS[self.agent].current_battle:
                 if count == 0:
                     raise RuntimeError("Agent is not challenging")
                 count -= 1
                 time.sleep(self._TIME_BETWEEN_RETRIES)
         if self.current_battle and not self.current_battle.finished:
-            if self.current_battle == self.agent.current_battle:
+            if self.current_battle == ALL_PLAYERS[self.agent].current_battle:
                 self._actions.put(-1)
                 self._observations.get()
             else:
                 raise RuntimeError(
                     "Environment and agent aren't synchronized. Try to restart"
                 )
-        while self.current_battle == self.agent.current_battle:
+        while self.current_battle == ALL_PLAYERS[self.agent].current_battle:
             time.sleep(0.01)
-        self.current_battle = self.agent.current_battle
+        self.current_battle = ALL_PLAYERS[self.agent].current_battle
         battle = copy.copy(self.current_battle)
         battle.logger = None
         self.last_battle = copy.deepcopy(battle)
@@ -431,8 +494,8 @@ class OpenAIGymEnv(
     def close(self, purge: bool = True):
         if self.current_battle is None or self.current_battle.finished:
             time.sleep(1)
-            if self.current_battle != self.agent.current_battle:
-                self.current_battle = self.agent.current_battle
+            if self.current_battle != ALL_PLAYERS[self.agent].current_battle:
+                self.current_battle = ALL_PLAYERS[self.agent].current_battle
         closing_task = asyncio.run_coroutine_threadsafe(
             self._stop_challenge_loop(purge=purge), POKE_LOOP
         )
@@ -456,7 +519,7 @@ class OpenAIGymEnv(
                 "'await agent.stop_challenge_loop()' to clear the task."
             )
         self._challenge_task = asyncio.run_coroutine_threadsafe(
-            self.agent.send_challenges(username, 1), POKE_LOOP
+            ALL_PLAYERS[self.agent].send_challenges(username, 1), POKE_LOOP
         )
 
     def background_accept_challenge(self, username: str):
@@ -474,7 +537,7 @@ class OpenAIGymEnv(
                 "'await agent.stop_challenge_loop()' to clear the task."
             )
         self._challenge_task = asyncio.run_coroutine_threadsafe(
-            self.agent.accept_challenges(username, 1, self.agent.next_team), POKE_LOOP
+            ALL_PLAYERS[self.agent].accept_challenges(username, 1, ALL_PLAYERS[self.agent].next_team), POKE_LOOP
         )
 
     async def _challenge_loop(
@@ -486,18 +549,18 @@ class OpenAIGymEnv(
             while self._keep_challenging:
                 opponent = self._get_opponent()
                 if isinstance(opponent, Player):
-                    await self.agent.battle_against(opponent, 1)
+                    await ALL_PLAYERS[self.agent].battle_against(opponent, 1)
                 else:
-                    await self.agent.send_challenges(opponent, 1)
+                    await ALL_PLAYERS[self.agent].send_challenges(opponent, 1)
                 if callback and self.current_battle is not None:
                     callback(copy.deepcopy(self.current_battle))
         elif n_challenges > 0:
             for _ in range(n_challenges):
                 opponent = self._get_opponent()
                 if isinstance(opponent, Player):
-                    await self.agent.battle_against(opponent, 1)
+                    await ALL_PLAYERS[self.agent].battle_against(opponent, 1)
                 else:
-                    await self.agent.send_challenges(opponent, 1)
+                    await ALL_PLAYERS[self.agent].send_challenges(opponent, 1)
                 if callback and self.current_battle is not None:
                     callback(copy.deepcopy(self.current_battle))
         else:
@@ -542,12 +605,12 @@ class OpenAIGymEnv(
                     f"Number of challenges must be > 0. Got {n_challenges}"
                 )
             for _ in range(n_challenges):
-                await self.agent.ladder(1)
+                await ALL_PLAYERS[self.agent].ladder(1)
                 if callback and self.current_battle is not None:
                     callback(copy.deepcopy(self.current_battle))
         else:
             while self._keep_challenging:
-                await self.agent.ladder(1)
+                await ALL_PLAYERS[self.agent].ladder(1)
                 if callback and self.current_battle is not None:
                     callback(copy.deepcopy(self.current_battle))
 
@@ -605,18 +668,18 @@ class OpenAIGymEnv(
 
         self._challenge_task = None
         self.current_battle = None
-        self.agent.current_battle = None
+        ALL_PLAYERS[self.agent].current_battle = None
         while not self._actions.empty():
             await self._actions.async_get()
         while not self._observations.empty():
             await self._observations.async_get()
 
         if purge:
-            self.agent.reset_battles()
+            ALL_PLAYERS[self.agent].reset_battles()
 
     def reset_battles(self):
         """Resets the player's inner battle tracker."""
-        self.agent.reset_battles()
+        ALL_PLAYERS[self.agent].reset_battles()
 
     def done(self, timeout: Optional[int] = None) -> bool:
         """
@@ -644,35 +707,35 @@ class OpenAIGymEnv(
 
     @property
     def battles(self) -> Dict[str, AbstractBattle]:
-        return self.agent.battles
+        return ALL_PLAYERS[self.agent].battles
 
     @property
     def format(self) -> str:
-        return self.agent.format
+        return ALL_PLAYERS[self.agent].format
 
     @property
     def format_is_doubles(self) -> bool:
-        return self.agent.format_is_doubles
+        return ALL_PLAYERS[self.agent].format_is_doubles
 
     @property
     def n_finished_battles(self) -> int:
-        return self.agent.n_finished_battles
+        return ALL_PLAYERS[self.agent].n_finished_battles
 
     @property
     def n_lost_battles(self) -> int:
-        return self.agent.n_lost_battles
+        return ALL_PLAYERS[self.agent].n_lost_battles
 
     @property
     def n_tied_battles(self) -> int:
-        return self.agent.n_tied_battles
+        return ALL_PLAYERS[self.agent].n_tied_battles
 
     @property
     def n_won_battles(self) -> int:
-        return self.agent.n_won_battles
+        return ALL_PLAYERS[self.agent].n_won_battles
 
     @property
     def win_rate(self) -> float:
-        return self.agent.win_rate
+        return ALL_PLAYERS[self.agent].win_rate
 
     # Expose properties of Player Network Interface Class
 
@@ -683,7 +746,7 @@ class OpenAIGymEnv(
         :return: The logged-in event
         :rtype: Event
         """
-        return self.agent.ps_client.logged_in
+        return ALL_PLAYERS[self.agent].ps_client.logged_in
 
     @property
     def logger(self) -> Logger:
@@ -692,7 +755,7 @@ class OpenAIGymEnv(
         :return: The logger.
         :rtype: Logger
         """
-        return self.agent.logger
+        return ALL_PLAYERS[self.agent].logger
 
     @property
     def username(self) -> str:
@@ -701,7 +764,7 @@ class OpenAIGymEnv(
         :return: The player's username.
         :rtype: str
         """
-        return self.agent.username
+        return ALL_PLAYERS[self.agent].username
 
     @property
     def websocket_url(self) -> str:
@@ -712,96 +775,9 @@ class OpenAIGymEnv(
         :return: The websocket url.
         :rtype: str
         """
-        return self.agent.ps_client.websocket_url
+        return ALL_PLAYERS[self.agent].ps_client.websocket_url
 
     def __getattr__(self, item: str):
-        return getattr(self.agent, item)
+        return getattr(ALL_PLAYERS[self.agent], item)
 
 
-class LegacyOpenAIGymEnv(OpenAIGymEnv[ObsType, ActType], ABC):
-    """
-    Subclass of OpenAIGymEnv compatible with the old gym API.
-    If you need compatibility with the old gym API you should use the
-    `wrap_for_old_gym_api` function.
-    """
-
-    def reset(
-        self,
-        *,
-        seed: Optional[int] = None,
-        return_info: bool = False,
-        options: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[ObsType, Dict[str, Any]]:
-        obs, info = super().reset(seed=seed, return_info=True, options=options)
-        ### rz change - only return observation
-        # return obs, info
-        return obs
-
-    def step(
-        self, action: ActType
-    ) -> Tuple[ObsType, float, bool, bool, Dict[str, Any]]:
-        """
-        Execute the specified action in the environment.
-
-        :param ActType action: The action to be executed.
-        :return: A tuple containing the new observation, reward, termination flag, truncation flag, and info dictionary.
-        :rtype: Tuple[ObsType, float, bool, bool, Dict[str, Any]]
-        """
-        obs, reward, terminated, truncated, info = super().step(action)
-        # rz change - only return 4 things (obs, reward, done, info)
-        # return obs, reward, terminated, truncated, info
-        done = terminated or truncated
-        return obs, reward, done, info
-
-
-class _OpenAIGymEnvWrapper(LegacyOpenAIGymEnv[ObsType, ActType]):
-    def __init__(self, environment: OpenAIGymEnv[ObsType, ActType]):
-        self._wrapped = environment
-        self.step = super().step.__get__(self._wrapped, self._wrapped.__class__)
-        self.reset = super().reset.__get__(self._wrapped, self._wrapped.__class__)
-        self._instantiated = True
-
-    def calc_reward(
-        self, last_battle: AbstractBattle, current_battle: AbstractBattle
-    ) -> float:
-        return self._wrapped.calc_reward(last_battle, current_battle)
-
-    def action_to_move(self, action: int, battle: AbstractBattle) -> BattleOrder:
-        return self._wrapped.action_to_move(action, battle)
-
-    def embed_battle(self, battle: AbstractBattle) -> ObsType:
-        return self._wrapped.embed_battle(battle)
-
-    def describe_embedding(self) -> Space[ObsType]:
-        return self._wrapped.describe_embedding()
-
-    def action_space_size(self) -> int:
-        return self._wrapped.action_space_size()
-
-    def get_opponent(self) -> Union[Player, str, List[Player], List[str]]:
-        return self._wrapped.get_opponent()
-
-    def __getattr__(self, item: str):
-        if item == "_instantiated":
-            return False
-        return getattr(self._wrapped, item)
-
-    def __setattr__(self, key: str, value: Any):
-        if not self._instantiated:
-            return super().__setattr__(key, value)
-        return setattr(self._wrapped, key, value)
-
-
-def wrap_for_old_gym_api(
-    env: OpenAIGymEnv[ObsType, ActType]
-) -> LegacyOpenAIGymEnv[ObsType, ActType]:
-    """
-    Wraps an OpenAIGymEnv in order to support the old gym API.
-
-    :param env: the environment to wrap.
-    :type env: OpenAIGymEnv
-
-    :return: The wrapped environment
-    :rtype: OpenAIGymEnv
-    """
-    return _OpenAIGymEnvWrapper(env)

@@ -21,7 +21,7 @@ class EnvPlayer(OpenAIGymEnv[ObsType, ActType], ABC):
 
     def __init__(
         self,
-        opponent: Optional[Union[Player, str]],
+        opponent_fn: Optional[Union[Player, str]],
         account_configuration: Optional[AccountConfiguration] = None,
         *,
         avatar: Optional[int] = None,
@@ -82,11 +82,11 @@ class EnvPlayer(OpenAIGymEnv[ObsType, ActType], ABC):
         """
         self._reward_buffer: Dict[AbstractBattle, float] = {}
         self._opponent_lock = Lock()
-        self._opponent = opponent
+        self._opponent = opponent_fn()
         b_format = self._DEFAULT_BATTLE_FORMAT
         if battle_format:
             b_format = battle_format
-        if opponent is None:
+        if self._opponent is None:
             start_challenging = False
         super().__init__(
             account_configuration=account_configuration,
