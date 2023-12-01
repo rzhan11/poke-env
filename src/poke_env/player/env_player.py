@@ -24,6 +24,7 @@ class EnvPlayer(OpenAIGymEnv[ObsType, ActType], ABC):
         opponent_fn: Optional[Union[Player, str]],
         account_configuration: Optional[AccountConfiguration] = None,
         *,
+        worker_id_fn = lambda: None,
         avatar: Optional[int] = None,
         battle_format: Optional[str] = None,
         log_level: Optional[int] = None,
@@ -80,15 +81,22 @@ class EnvPlayer(OpenAIGymEnv[ObsType, ActType], ABC):
             or leave it inactive.
         :type start_challenging: bool
         """
+        # get worker id now
+        worker_id = worker_id_fn()
+        # we may pass in a function that returns the account (since the username may be worker-specific)
+        if callable(account_configuration):
+            account_configuration = account_configuration(worker_id)
+
         self._reward_buffer: Dict[AbstractBattle, float] = {}
         self._opponent_lock = Lock()
-        self._opponent = opponent_fn()
+        self._opponent = opponent_fn(worker_id)
         b_format = self._DEFAULT_BATTLE_FORMAT
         if battle_format:
             b_format = battle_format
         if self._opponent is None:
             start_challenging = False
         super().__init__(
+            worker_id=worker_id,
             account_configuration=account_configuration,
             avatar=avatar,
             battle_format=b_format,
