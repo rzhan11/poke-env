@@ -138,7 +138,6 @@ class OpenAIGymEnv(
         self,
         account_configuration: Optional[AccountConfiguration] = None,
         *,
-        worker_id: int = 0,
         avatar: Optional[int] = None,
         battle_format: str = "gen8randombattle",
         log_level: Optional[int] = None,
@@ -195,7 +194,6 @@ class OpenAIGymEnv(
             leave it inactive.
         :type start_challenging: bool
         """
-        print("OpenAIGymEnv:", worker_id, account_configuration)
         self.agent = _AsyncPlayer(
             self,
             username=self.__class__.__name__,  # type: ignore
@@ -212,7 +210,6 @@ class OpenAIGymEnv(
             ping_timeout=ping_timeout,
             team=team,
         )
-        self._worker_id = worker_id
         self._actions = self.agent.actions
         self._observations = self.agent.observations
         self.action_space = Discrete(self.action_space_size())  # type: ignore
