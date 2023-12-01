@@ -733,7 +733,9 @@ class LegacyOpenAIGymEnv(OpenAIGymEnv[ObsType, ActType], ABC):
         options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[ObsType, Dict[str, Any]]:
         obs, info = super().reset(seed=seed, return_info=True, options=options)
-        return obs, info
+        ### rz change - only return observation
+        # return obs, info
+        return obs
 
     def step(
         self, action: ActType
@@ -746,7 +748,10 @@ class LegacyOpenAIGymEnv(OpenAIGymEnv[ObsType, ActType], ABC):
         :rtype: Tuple[ObsType, float, bool, bool, Dict[str, Any]]
         """
         obs, reward, terminated, truncated, info = super().step(action)
-        return obs, reward, terminated, truncated, info
+        # rz change - only return 4 things (obs, reward, done, info)
+        # return obs, reward, terminated, truncated, info
+        done = terminated or truncated
+        return obs, reward, done, info
 
 
 class _OpenAIGymEnvWrapper(LegacyOpenAIGymEnv[ObsType, ActType]):
