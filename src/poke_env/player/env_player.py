@@ -87,6 +87,8 @@ class EnvPlayer(OpenAIGymEnv[ObsType, ActType], ABC):
         b_format = self._DEFAULT_BATTLE_FORMAT
         if battle_format:
             b_format = battle_format
+        if opponent is None:
+            start_challenging = False
         super().__init__(
             account_configuration=account_configuration,
             avatar=avatar,
