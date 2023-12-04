@@ -377,7 +377,9 @@ class OpenAIGymEnv(
             raise RuntimeError("Battle is already finished, call reset")
         battle = copy.copy(self.current_battle)
         battle.logger = None
-        self.last_battle = copy.deepcopy(battle)
+        # print("\n\n--------HI")
+        # self.last_battle = copy.deepcopy(battle)
+        self.last_battle = battle
         self._actions.put(action)
         observation = self._observations.get()
         reward = self.calc_reward(self.last_battle, self.current_battle)
