@@ -347,7 +347,9 @@ class OpenAIGymEnv(
         self.current_battle = self.agent.current_battle
         battle = copy.copy(self.current_battle)
         battle.logger = None
-        self.last_battle = copy.deepcopy(battle)
+        # print("\n\n--------HI-reset")
+        # self.last_battle = copy.deepcopy(battle)
+        # self.last_battle = battle
         return self._observations.get(), self.get_additional_info()
 
     def get_additional_info(self) -> Dict[str, Any]:
@@ -377,7 +379,7 @@ class OpenAIGymEnv(
             raise RuntimeError("Battle is already finished, call reset")
         battle = copy.copy(self.current_battle)
         battle.logger = None
-        # print("\n\n--------HI")
+        # print("\n\n--------HI-step")
         # self.last_battle = copy.deepcopy(battle)
         self.last_battle = battle
         self._actions.put(action)
